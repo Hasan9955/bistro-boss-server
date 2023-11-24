@@ -2,6 +2,7 @@ const express = require('express')
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 require('dotenv').config()
+const stripe = require('stripe')(process.env.PAYMENT_KEY)
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const app = express()
 const port = process.env.PORT || 5000;
@@ -32,13 +33,14 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
 
     const menuCollection = client.db("BistroBoss").collection("menu")
     const userCollection = client.db("BistroBoss").collection("users")
     const reviewCollection = client.db("BistroBoss").collection("reviews")
     const cartCollection = client.db("BistroBoss").collection("cart")
+    const paymentCollection = client.db("BistroBoss").collection("payments")
 
     // our own middlewares
 
@@ -46,7 +48,7 @@ async function run() {
       if (!req.headers.authorization) {
         return res.status(401).send({ massage: 'Unauthorized Access' })
       }
-      const token = req.headers.authorization.split(' ')[1]
+      const token = req.headers.authorization.split(' ')[1] 
       jwt.verify(token, process.env.ACCESS_TOKEN, (err, decoded) => {
         if (err) {
           return res.status(401).send({ massage: 'Unauthorized Access' })
@@ -91,7 +93,7 @@ async function run() {
 
 
     app.get('/users/admin/:email', verifyToken, async (req, res) => {
-      const email = req.params.email
+      const email = req.params.email 
       if (email !== req.decoded.email) {
         return res.status(403).send({ massage: 'Forbidden Access' })
       }
@@ -156,7 +158,7 @@ async function run() {
 
     app.get('/menuItem/:id', async (req, res) => {
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) } 
+      const query = { _id: new ObjectId(id) }
       const result = await menuCollection.findOne(query)
       res.send(result);
     })
@@ -165,7 +167,7 @@ async function run() {
     app.patch('/menu/:id', async (req, res) => {
       const item = req.body;
       const id = req.params.id;
-      const filter = { _id: new ObjectId(id)}
+      const filter = { _id: new ObjectId(id) }
       const updatedDoc = {
         $set: {
           name: item.name,
@@ -178,7 +180,7 @@ async function run() {
       const result = await menuCollection.updateOne(filter, updatedDoc)
       res.send(result)
     })
-    
+
 
     app.post('/menu', verifyToken, verifyAdmin, async (req, res) => {
       const item = req.body;
@@ -219,9 +221,89 @@ async function run() {
       res.send(result)
     })
 
+
+    // source:(https://stripe.com/docs/payments/quickstart)
+    // path: stripeDocs/payment/quickStart 
+    // generate payment secure key from server to client
+    /* ---------PAYMENT--------- */
+    app.post('/create-payment-intent', async (req, res) => {
+      const { price } = req.body 
+      const amount = parseInt(price * 100) 
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        // ------------*************---------------
+        // most important thing which we include from ourselves
+        // source: (https://stripe.com/docs/api/payment_intents/object)
+        // path: stripDocs/payment/quickStart/Create a PaymentIntent link
+        payment_method_types: ['card']
+        
+      })
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      })
+    })
+
+
+    // save payment details data in database
+    app.post('/payments', async(req, res) =>{
+      const paymentDetails = req.body;
+      const paymentResult = await paymentCollection.insertOne(paymentDetails) 
+
+      // carefully delate all items from user cart
+      const query = {_id: {
+        $in: paymentDetails.cartIds.map(id => new ObjectId(id))
+      }}
+
+      const deleteResult = await cartCollection.deleteMany(query)
+
+      res.send({paymentResult, deleteResult})
+
+    })
+
+    app.get('/payments/:email', verifyToken, async(req, res) =>{
+      const email = req.params.email
+      const query = {email: email}
+      if(email !== req.decoded.email){
+        return res.status(403).send({massage: 'forbidden access'})
+      }
+      const result = await paymentCollection.find(query).toArray()
+      res.send(result)
+    })
+
+
+    // get data for admin home
+    app.get('/admin-state', verifyToken, verifyAdmin, async(req, res) =>{
+      const totalUser = await userCollection.estimatedDocumentCount()
+      const totalMenu = await menuCollection.estimatedDocumentCount();
+      const totalOrder = await paymentCollection.estimatedDocumentCount();
+
+      // get revenue
+      const result = await paymentCollection.aggregate([
+        {
+          $group: {
+            _id: null,
+            revenue: {
+              $sum: '$price'
+            }
+          }
+        }
+      ]).toArray()
+
+      const totalRevenue = result.length > 0 ? result[0].revenue : 0;
+      res.send({ totalUser, totalMenu, totalOrder, totalRevenue })
+    })
+
+
+    
+
+
+
+
+
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
